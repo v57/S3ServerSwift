@@ -23,7 +23,8 @@ import Testing
 
     func start(
         accepts: (@Sendable (String) -> Bool)? = nil,
-        admit: (@Sendable (S3Upload) -> S3Error?)? = nil
+        admit: (@Sendable (S3Upload) -> S3Error?)? = nil,
+        ended: (@Sendable (S3Upload) -> Void)? = nil
     ) async throws -> Running {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("S3Embedding-\(UUID().uuidString)")
         let changes = Changes()
@@ -31,7 +32,7 @@ import Testing
             host: "::", port: 0, bucketPaths: ["hub": root.appendingPathComponent("hub").path], key: "k", secret: "s"
         )
         let server = S3Server(options: options, hooks: S3ServerHooks(
-            acceptsConnection: accepts, admitUpload: admit, changed: { changes.append($0) }
+            acceptsConnection: accepts, admitUpload: admit, changed: { changes.append($0) }, uploadEnded: ended
         ))
         try await server.start()
         let port = try #require(await server.boundPort)
@@ -98,6 +99,31 @@ import Testing
             connection.start(queue: queue)
             queue.asyncAfter(deadline: .now() + timeout) { finish(nil) }
         }
+    }
+
+    @Test func everyAdmittedUploadEndsOnce() async throws {
+        final class Ended: @unchecked Sendable {
+            private let lock = NSLock()
+            private var keys: [String] = []
+            func append(_ key: String) { lock.withLock { keys.append(key) } }
+            var all: [String] { lock.withLock { keys } }
+        }
+        let ended = Ended()
+        let running = try await start(ended: { ended.append($0.key) })
+        defer { Task { await stop(running) } }
+        let port = try #require(await running.server.boundPort)
+        // Stored
+        #expect(try await put(running.presigner.url(method: "PUT", key: "a.txt"), Data("hello".utf8)).0 == 200)
+        #expect(ended.all == ["a.txt"])
+        // Cut off halfway: the temporary file goes and the upload ends
+        let url = running.presigner.url(method: "PUT", key: "cut.bin")
+        let parts = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        let head = "PUT \(parts.percentEncodedPath)?\(parts.percentEncodedQuery!) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nContent-Length: 100000\r\n\r\n"
+        _ = await raw(port, Data(head.utf8) + Data(count: 1000), timeout: 0.5)
+        for _ in 0..<40 where ended.all.count < 2 { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(ended.all == ["a.txt", "cut.bin"])
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: running.folder.path)
+        #expect(leftovers == ["a.txt"])
     }
 
     @Test func refusesAnUnsignedUploadBeforeItsBody() async throws {

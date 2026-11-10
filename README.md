@@ -54,7 +54,9 @@ let server = S3Server(options: options, hooks: S3ServerHooks(
     // Before an upload's body is read, after its signature passed
     admitUpload: { upload in upload.length - upload.replacedSize > 1 << 30 ? .storageFull() : nil },
     // Objects stored or deleted through the server
-    changed: { change in print(change) }
+    changed: { change in print(change) },
+    // Once per admitted upload when it ended, stored or not: a quota holds its room until then
+    uploadEnded: { upload in print("ended", upload.key) }
 ))
 try await server.start()
 let port = await server.boundPort!

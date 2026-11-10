@@ -59,9 +59,11 @@ struct S3RequestHandler: Sendable {
         if let refusal = hooks.admitUpload?(request) {
             return .respond(S3Responses.xmlError(refusal))
         }
+        let ended = hooks.uploadEnded.map { ended in { @Sendable in ended(request) } }
         do {
-            return .stream(try UploadSink(store: store, upload: upload, payload: payload, changed: hooks.changed))
+            return .stream(try UploadSink(store: store, upload: upload, payload: payload, changed: hooks.changed, ended: ended))
         } catch {
+            ended?()
             return .respond(Self.response(for: error))
         }
     }
@@ -202,6 +204,7 @@ final class UploadSink: HTTPBodySink, @unchecked Sendable {
     private let upload: ObjectStore.PendingUpload
     private let payload: SigV4Payload
     private let changed: (@Sendable (S3Change) -> Void)?
+    private let ended: (@Sendable () -> Void)?
     private let handle: FileHandle
     private var hasher: SHA256Hasher?
     private var isDone = false
@@ -210,12 +213,14 @@ final class UploadSink: HTTPBodySink, @unchecked Sendable {
         store: ObjectStore,
         upload: ObjectStore.PendingUpload,
         payload: SigV4Payload,
-        changed: (@Sendable (S3Change) -> Void)?
+        changed: (@Sendable (S3Change) -> Void)?,
+        ended: (@Sendable () -> Void)? = nil
     ) throws {
         self.store = store
         self.upload = upload
         self.payload = payload
         self.changed = changed
+        self.ended = ended
         guard FileManager.default.createFile(atPath: upload.tempPath, contents: nil) else {
             throw S3Error.internalError("Can't create the upload's file")
         }
@@ -245,6 +250,7 @@ final class UploadSink: HTTPBodySink, @unchecked Sendable {
     func finish() -> HTTPResponse {
         guard !isDone else { return S3Responses.xmlError(.internalError("Upload already finished")) }
         isDone = true
+        defer { ended?() }
         try? handle.close()
         if let hasher, !payload.matches(hex: hasher.finalizeHex()) {
             store.discard(upload)
@@ -264,6 +270,7 @@ final class UploadSink: HTTPBodySink, @unchecked Sendable {
         isDone = true
         try? handle.close()
         store.discard(upload)
+        ended?()
     }
 
     func failure(_ error: Error) -> HTTPResponse {

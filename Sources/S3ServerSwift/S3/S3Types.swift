@@ -53,14 +53,20 @@ public struct S3ServerHooks: Sendable {
     public var admitUpload: (@Sendable (S3Upload) -> S3Error?)?
     /// After an object was stored or deleted through the server
     public var changed: (@Sendable (S3Change) -> Void)?
+    /// Once for every upload `admitUpload` let in, when it ended: stored (after `changed`), refused for its hash,
+    /// failed or cut off. A quota holds the upload's room from admission until then, so uploads that run at the
+    /// same time can't fill more than it allows together.
+    public var uploadEnded: (@Sendable (S3Upload) -> Void)?
 
     public init(
         acceptsConnection: (@Sendable (String) -> Bool)? = nil,
         admitUpload: (@Sendable (S3Upload) -> S3Error?)? = nil,
-        changed: (@Sendable (S3Change) -> Void)? = nil
+        changed: (@Sendable (S3Change) -> Void)? = nil,
+        uploadEnded: (@Sendable (S3Upload) -> Void)? = nil
     ) {
         self.acceptsConnection = acceptsConnection
         self.admitUpload = admitUpload
         self.changed = changed
+        self.uploadEnded = uploadEnded
     }
 }
