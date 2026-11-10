@@ -26,6 +26,13 @@ public struct S3Upload: Sendable, Equatable {
     public var length: Int64
     /// The size of the object it replaces, 0 for a new one
     public var replacedSize: Int64
+
+    public init(bucket: String, key: String, length: Int64, replacedSize: Int64) {
+        self.bucket = bucket
+        self.key = key
+        self.length = length
+        self.replacedSize = replacedSize
+    }
 }
 
 /// What changed in the storage through the server
