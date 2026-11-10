@@ -1,10 +1,16 @@
 import Foundation
 
+/// Parses HTTP/1.1 requests. The connection reads a request's head first (`head(_:isComplete:)`), checks it, and only
+/// then takes the body (`takeBody(upTo:)` for bytes that came with the head, then the connection's own reads), so an
+/// unsigned request never makes the server hold its body. `append` parses whole requests, body in memory.
 struct HTTPRequestParser: Sendable {
+    /// Received bytes not consumed yet: a head in progress, or body bytes that came with the head
     private(set) var buffer = Data()
     let maximumBodyBytes: Int
     let maximumRequestLineBytes: Int
     let maximumHeaderBytes: Int
+    /// The head `append` parsed while it waits for the body
+    private var pending: HTTPRequestHead?
 
     init(
         maximumBodyBytes: Int,
@@ -24,11 +30,12 @@ struct HTTPRequestParser: Sendable {
     /// preserving any pipelined bytes already buffered past the prior body.
     mutating func resetForNextRequest() {
         wantsClose = false
-        // `buffer` holds only unconsumed bytes from here on; the connection
-        // calls this after consuming a completed request's bytes.
+        pending = nil
     }
 
-    mutating func append(_ data: Data, isComplete: Bool = false) throws -> HTTPRequest? {
+    /// Adds `data` and returns the request's head once it's complete. Bytes past the head stay buffered for
+    /// `takeBody(upTo:)`.
+    mutating func head(_ data: Data, isComplete: Bool = false) throws -> HTTPRequestHead? {
         buffer.append(data)
 
         guard let headerRange = buffer.range(of: Data("\r\n\r\n".utf8)) else {
@@ -41,7 +48,7 @@ struct HTTPRequestParser: Sendable {
             return nil
         }
 
-        let headerEnd = headerRange.upperBound
+        let headerEnd = headerRange.upperBound - buffer.startIndex
         guard headerEnd <= maximumHeaderBytes else {
             throw HTTPTransportError.requestHeadersTooLarge
         }
@@ -71,6 +78,7 @@ struct HTTPRequestParser: Sendable {
 
         var headers: [String: String] = [:]
         var contentLength: Int?
+        var expectsContinue = false
         for line in lines {
             guard !line.isEmpty,
                   let colon = line.firstIndex(of: ":")
@@ -104,6 +112,8 @@ struct HTTPRequestParser: Sendable {
                 {
                     wantsClose = true
                 }
+            } else if name == "expect" {
+                expectsContinue = value.caseInsensitiveCompare("100-continue") == .orderedSame
             }
 
             if let existing = headers[name] {
@@ -113,33 +123,55 @@ struct HTTPRequestParser: Sendable {
             }
         }
 
-        let expectedBodyBytes = contentLength ?? 0
-        if maximumBodyBytes > 0, expectedBodyBytes > maximumBodyBytes {
-            throw HTTPTransportError.payloadTooLarge
-        }
+        buffer.removeSubrange(..<headerRange.upperBound)
+        buffer = Data(buffer)
+        return HTTPRequestHead(
+            method: String(requestParts[0]),
+            target: String(requestParts[1]),
+            headers: headers,
+            contentLength: contentLength ?? 0,
+            wantsClose: wantsClose,
+            expectsContinue: expectsContinue
+        )
+    }
 
-        let receivedBodyBytes = buffer.count - headerEnd
-        if maximumBodyBytes > 0, receivedBodyBytes > maximumBodyBytes {
-            throw HTTPTransportError.payloadTooLarge
+    /// Takes up to `count` buffered body bytes; what's left past them is the next request
+    mutating func takeBody(upTo count: Int) -> Data {
+        let taken = min(count, buffer.count)
+        guard taken > 0 else { return Data() }
+        let body = Data(buffer.prefix(taken))
+        buffer = Data(buffer.dropFirst(taken))
+        return body
+    }
+
+    /// Keeps bytes that came past a body: the start of the next request
+    mutating func push(_ data: Data) {
+        buffer.append(data)
+    }
+
+    /// Parses a whole request, body in memory: the head, then `Content-Length` bytes. Enforces
+    /// `maximumBodyBytes` from the head.
+    mutating func append(_ data: Data, isComplete: Bool = false) throws -> HTTPRequest? {
+        let head: HTTPRequestHead
+        if let pending {
+            buffer.append(data)
+            head = pending
+        } else {
+            guard let parsed = try self.head(data, isComplete: isComplete) else { return nil }
+            if maximumBodyBytes > 0, parsed.contentLength > maximumBodyBytes {
+                throw HTTPTransportError.payloadTooLarge
+            }
+            head = parsed
         }
-        guard receivedBodyBytes >= expectedBodyBytes else {
+        guard buffer.count >= head.contentLength else {
+            pending = head
             if isComplete {
                 throw HTTPTransportError.badRequest("Premature end of request body")
             }
             return nil
         }
-
-        let bodyEnd = headerEnd + expectedBodyBytes
-        let request = HTTPRequest(
-            method: String(requestParts[0]),
-            target: String(requestParts[1]),
-            headers: headers,
-            body: buffer[headerEnd..<bodyEnd]
-        )
-        // Drop the consumed request bytes; anything past the body is a
-        // pipelined next request the connection will parse next.
-        buffer.removeSubrange(..<bodyEnd)
-        return request
+        pending = nil
+        return HTTPRequest(head: head, body: takeBody(upTo: head.contentLength))
     }
 
     private static func isHeaderNameCharacter(_ character: Character) -> Bool {

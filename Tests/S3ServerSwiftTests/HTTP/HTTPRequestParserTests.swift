@@ -44,10 +44,23 @@ func parserRejectsInvalidOrAmbiguousLengths(_ header: String) {
         try declared.append(Data("PUT / HTTP/1.1\r\nContent-Length: 3\r\n\r\n".utf8))
     }
 
+    // Bytes past the declared body are the next request's, not more body
     var received = HTTPRequestParser(maximumBodyBytes: 2)
-    #expect(throws: HTTPTransportError.payloadTooLarge) {
-        try received.append(Data("PUT / HTTP/1.1\r\nContent-Length: 2\r\n\r\nabc".utf8))
-    }
+    let request = try? received.append(Data("PUT / HTTP/1.1\r\nContent-Length: 2\r\n\r\nabc".utf8))
+    #expect(request?.body == Data("ab".utf8))
+    #expect(received.buffer == Data("c".utf8))
+}
+
+@Test func headComesBeforeTheBodyAndLeavesItBuffered() throws {
+    var parser = HTTPRequestParser(maximumBodyBytes: 0)
+    let head = try #require(try parser.head(Data(
+        "PUT /b/k HTTP/1.1\r\nHost: h\r\nContent-Length: 100000000\r\nExpect: 100-continue\r\n\r\nxyz".utf8
+    )))
+    #expect(head.method == "PUT")
+    #expect(head.contentLength == 100_000_000)
+    #expect(head.expectsContinue)
+    #expect(parser.takeBody(upTo: 2) == Data("xy".utf8))
+    #expect(parser.buffer == Data("z".utf8))
 }
 
 @Test func parserRejectsOversizedHeadersPrematureEOFAndChunking() {

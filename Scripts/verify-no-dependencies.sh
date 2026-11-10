@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+# The package is the repository root
 package_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 description=$(cd "$package_dir" && swift package describe --type json)
 

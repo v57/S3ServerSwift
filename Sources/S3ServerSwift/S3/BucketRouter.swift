@@ -1,8 +1,8 @@
 import Foundation
 
 /// Resolves an authenticated request to a bucket root and a contained, validated
-/// object key, reproducing the Bun reference bucket detection, path containment,
-/// and symlink rejection rules.
+/// object key, reproducing the Bun reference's path-style bucket detection, path
+/// containment, and symlink rejection rules.
 ///
 /// The router is a pure value type over immutable options so its behavior can be
 /// unit-tested without a listener or real network request.
@@ -15,35 +15,18 @@ struct BucketRouter: Sendable {
         self.defaultRoot = defaultRoot
     }
 
-    /// Parses path-style and virtual-host bucket detection from the request
-    /// target, returning the bucket name and optional decoded key.
-    ///
-    /// Mirrors `parseBucketAndKey` in the reference: the host-derived bucket
-    /// wins over a differing path-derived bucket, and the entire path then
-    /// becomes the key.
-    func bucketAndKey(host: String?, path: String) throws -> (bucket: String?, key: String?) {
-        let hostBucket = bucketFromHost(host)
+    /// Parses the bucket and the optional decoded key from a path-style request
+    /// target. The host never names the bucket: presigned links to a Hub
+    /// Network share carry the share's authority (`s3-owner.v1-network.hub.invalid`),
+    /// whose first label isn't a bucket, so virtual-host addressing is gone, as
+    /// in the reference.
+    func bucketAndKey(path: String) throws -> (bucket: String?, key: String?) {
         let segments = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-
         guard let firstSegment = segments.first else {
-            return (hostBucket, nil)
+            return (nil, nil)
         }
 
-        let decodedFirst = try SigV4Canonicalization.percentDecode(Substring(firstSegment))
-
-        if let hostBucket, decodedFirst != hostBucket {
-            guard !hostBucket.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return (nil, nil)
-            }
-            if hostBucket.contains("/") || hostBucket.contains("\\") {
-                throw S3Error(code: "InvalidURI", message: "invalid bucket", status: 400)
-            }
-            let rawKey = segments.joined(separator: "/")
-            let key = rawKey.isEmpty ? nil : try SigV4Canonicalization.percentDecode(Substring(rawKey))
-            return (hostBucket, key)
-        }
-
-        let bucket = decodedFirst
+        let bucket = try SigV4Canonicalization.percentDecode(Substring(firstSegment))
         var key: String? = nil
         if segments.count > 1 {
             let rawKey = segments.dropFirst().joined(separator: "/")
@@ -56,24 +39,7 @@ struct BucketRouter: Sendable {
         if bucket.contains("/") || bucket.contains("\\") {
             throw S3Error(code: "InvalidURI", message: "invalid bucket", status: 400)
         }
-        // The decoded first segment may contain a slash after percent-decode
-        // (e.g. `%2F`); the reference catches this via the contains check above
-        // only for literal slashes in the already-decoded bucket. Match that.
         return (bucket, key)
-    }
-
-    /// Reference `parseBucketFromHost`: no bucket for localhost, `.local`,
-    /// IPs, or hosts with two or fewer dot labels; otherwise the first label.
-    func bucketFromHost(_ host: String?) -> String? {
-        guard let host, !host.isEmpty else { return nil }
-        let lower = host.lowercased()
-        if lower == "localhost" || lower.hasSuffix(".local") || isIPv4(lower) {
-            return nil
-        }
-        let labels = lower.split(separator: ".").map(String.init)
-        if labels.count <= 2 { return nil }
-        let bucket = labels[0]
-        return bucket.isEmpty ? nil : bucket
     }
 
     /// Resolves and contains the bucket root, returning it or throwing the
@@ -127,17 +93,6 @@ struct BucketRouter: Sendable {
             }
             // Stop walking once we leave existing components; PUT may create new ones.
             guard FileManager.default.fileExists(atPath: current) else { break }
-        }
-    }
-
-    private func isIPv4(_ value: String) -> Bool {
-        let parts = value.split(separator: ".").map(String.init)
-        guard parts.count == 4 else { return false }
-        return parts.allSatisfy { part in
-            guard let octet = Int(part), (0...255).contains(octet) else { return false }
-            // Reject leading zeros like `01`? Reference uses `net.isIP` which
-            // accepts them, so accept them here too.
-            return true
         }
     }
 

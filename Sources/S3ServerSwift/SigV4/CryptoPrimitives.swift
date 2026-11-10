@@ -87,3 +87,16 @@ enum CryptoPrimitives {
         return difference == 0
     }
 }
+
+/// SHA-256 of a body that comes in pieces
+struct SHA256Hasher {
+    private var hash = SHA256()
+
+    mutating func update(_ data: Data) {
+        hash.update(data: data)
+    }
+
+    func finalizeHex() -> String {
+        Hex.encode(hash.finalize())
+    }
+}

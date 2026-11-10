@@ -26,18 +26,26 @@ enum HTTPResponseWriter {
         return output
     }
 
+    /// The interim answer to `Expect: 100-continue`, once the request may send its body
+    static let continueHead = Data("HTTP/1.1 100 Continue\r\n\r\n".utf8)
+
     private static func reason(for status: Int) -> String {
         switch status {
+        case 100: "Continue"
         case 200: "OK"
         case 204: "No Content"
+        case 206: "Partial Content"
         case 400: "Bad Request"
         case 403: "Forbidden"
         case 404: "Not Found"
         case 405: "Method Not Allowed"
         case 413: "Payload Too Large"
+        case 416: "Range Not Satisfiable"
         case 431: "Request Header Fields Too Large"
         case 500: "Internal Server Error"
         case 501: "Not Implemented"
+        case 503: "Service Unavailable"
+        case 507: "Insufficient Storage"
         default: "Unknown"
         }
     }

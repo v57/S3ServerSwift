@@ -10,6 +10,25 @@ struct SigV4AuthenticationError: Error, Equatable, Sendable {
     }
 }
 
+/// What a signed request's body must hash to, checked once the body is in
+enum SigV4Payload: Sendable, Equatable {
+    /// Presigned, or `UNSIGNED-PAYLOAD`: the signature doesn't cover the body
+    case unsigned
+    /// The lowercase hex SHA-256 the signature covers
+    case sha256(String)
+
+    func matches(_ body: Data) -> Bool {
+        matches(hex: CryptoPrimitives.sha256Hex(body))
+    }
+
+    func matches(hex: String) -> Bool {
+        switch self {
+        case .unsigned: true
+        case let .sha256(expected): expected == hex
+        }
+    }
+}
+
 struct SigV4Verifier: Sendable {
     var accessKeyID: String
     var secretAccessKey: String
@@ -31,10 +50,19 @@ struct SigV4Verifier: Sendable {
         self.now = now
     }
 
+    /// Checks a whole request, body included
     func verify(_ request: HTTPRequest) -> Result<Void, SigV4AuthenticationError> {
+        verify(request.head).flatMap { payload in
+            payload.matches(request.body) ? .success(()) : .failure(.accessDenied("payload hash mismatch"))
+        }
+    }
+
+    /// Checks a request from its head alone, before its body is read: the signature covers the payload hash the
+    /// request declares (`x-amz-content-sha256`), so a request that carries a body must declare one (or be presigned).
+    /// The answer says what the body must hash to.
+    func verify(_ head: HTTPRequestHead) -> Result<SigV4Payload, SigV4AuthenticationError> {
         do {
-            try verifyThrowing(request)
-            return .success(())
+            return .success(try verifyThrowing(head))
         } catch let error as SigV4AuthenticationError {
             return .failure(error)
         } catch {
@@ -42,11 +70,17 @@ struct SigV4Verifier: Sendable {
         }
     }
 
-    private func verifyThrowing(_ request: HTTPRequest) throws {
+    private func verifyThrowing(_ request: HTTPRequestHead) throws -> SigV4Payload {
         let target = try parseTarget(request.target)
         let query = try queryValues(target.query)
         let presignedAlgorithm = query.firstValue(for: "X-Amz-Algorithm")
         let isPresigned = presignedAlgorithm != nil
+        // As the reference: an upload that isn't presigned names its payload hash, which the signature covers
+        if !isPresigned, request.method == "PUT" || request.method == "POST",
+           header("x-amz-content-sha256", in: request.headers) == nil
+        {
+            throw SigV4AuthenticationError.accessDenied("Missing x-amz-content-sha256")
+        }
 
         let fields: AuthenticationFields
         if isPresigned {
@@ -177,22 +211,26 @@ struct SigV4Verifier: Sendable {
         }
 
         let payloadHash: String
+        let payload: SigV4Payload
         if isPresigned {
             payloadHash = "UNSIGNED-PAYLOAD"
+            payload = .unsigned
         } else if let suppliedHash = header("x-amz-content-sha256", in: request.headers) {
             if suppliedHash == "UNSIGNED-PAYLOAD"
                 || suppliedHash == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"
             {
                 payloadHash = suppliedHash
+                payload = .unsigned
             } else {
-                let actualHash = CryptoPrimitives.sha256Hex(request.body)
-                guard suppliedHash.lowercased() == actualHash else {
-                    throw SigV4AuthenticationError.accessDenied("payload hash mismatch")
-                }
                 payloadHash = suppliedHash.lowercased()
+                payload = .sha256(payloadHash)
             }
+        } else if request.contentLength == 0, request.method != "PUT", request.method != "POST" {
+            // Without a declared hash the signature covers the empty body's
+            payloadHash = CryptoPrimitives.sha256Hex(Data())
+            payload = .sha256(payloadHash)
         } else {
-            payloadHash = CryptoPrimitives.sha256Hex(request.body)
+            throw SigV4AuthenticationError.accessDenied("Missing x-amz-content-sha256")
         }
 
         let canonicalRequest = [
@@ -222,6 +260,7 @@ struct SigV4Verifier: Sendable {
         ) else {
             throw SigV4AuthenticationError.accessDenied("Signature mismatch")
         }
+        return payload
     }
 
     private func parseAuthorizationHeader(

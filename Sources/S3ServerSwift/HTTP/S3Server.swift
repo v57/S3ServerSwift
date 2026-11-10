@@ -7,14 +7,21 @@ import Network
 /// parsing and dispatch are layered onto accepted connections separately.
 public actor S3Server {
     public let options: S3ServerOptions
+    public let hooks: S3ServerHooks
+    /// The storage behind the server, for an app that embeds it to list, size and delete objects in process
+    public nonisolated let storage: S3Storage
     public private(set) var boundPort: UInt16?
+    /// Listening: `start()` succeeded and neither `stop()` nor a failure (an iPhone app suspended for long) ended it
+    public var isRunning: Bool { listener != nil }
 
     private let queue = DispatchQueue(label: "S3ServerSwift.HTTPServer")
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: HTTPConnection] = [:]
 
-    public init(options: S3ServerOptions) {
+    public init(options: S3ServerOptions, hooks: S3ServerHooks = S3ServerHooks()) {
         self.options = options
+        self.hooks = hooks
+        storage = S3Storage(options: options)
     }
 
     /// Creates configured storage roots and starts accepting TCP connections.
@@ -29,11 +36,17 @@ public actor S3Server {
 
         let requestedPort = NWEndpoint.Port(rawValue: options.port)!
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(
-            host: NWEndpoint.Host(options.host),
-            port: requestedPort
-        )
-        let listener = try NWListener(using: parameters)
+        let listener: NWListener
+        if options.host == "::" {
+            // Every address of both families
+            listener = try NWListener(using: parameters, on: requestedPort)
+        } else {
+            parameters.requiredLocalEndpoint = .hostPort(
+                host: NWEndpoint.Host(options.host),
+                port: requestedPort
+            )
+            listener = try NWListener(using: parameters)
+        }
         self.listener = listener
 
         listener.newConnectionHandler = { [weak self] connection in
@@ -159,6 +172,12 @@ public actor S3Server {
             connection.cancel()
             return
         }
+        if let acceptsConnection = hooks.acceptsConnection {
+            guard let address = Self.address(connection.endpoint), acceptsConnection(address) else {
+                connection.cancel()
+                return
+            }
+        }
 
         let identifier = ObjectIdentifier(connection)
         let verifier = SigV4Verifier(
@@ -167,20 +186,21 @@ public actor S3Server {
             sessionToken: options.sessionToken,
             maximumTimeSkewSeconds: options.maximumTimeSkewSeconds
         )
-        let handler = S3RequestHandler(options: options)
+        let handler = S3RequestHandler(options: options, hooks: hooks)
         let httpConnection = HTTPConnection(
             connection: connection,
-            queue: queue,
-            maximumBodyBytes: options.maximumBodyBytes,
-            handler: { request in
-                // Body-limit enforcement happens in the parser (before auth),
-                // matching the reference ordering; surface it as the S3 XML error.
-                if case let .failure(error) = verifier.verify(request) {
-                    return S3Responses.xmlError(
+            queue: DispatchQueue(label: "S3ServerSwift.HTTPConnection"),
+            admit: { head in
+                // The signature first, from the head: an unsigned request never gets its body read. The body limit
+                // and the upload hooks come after, as in the reference.
+                switch verifier.verify(head) {
+                case let .failure(error):
+                    return .respond(S3Responses.xmlError(
                         S3Error(code: error.code, message: error.message, status: error.status)
-                    )
+                    ))
+                case let .success(payload):
+                    return handler.admit(head, payload: payload)
                 }
-                return handler.handle(request)
             },
             onClose: { [weak self] in
                 guard let self else { return }
@@ -191,6 +211,24 @@ public actor S3Server {
         )
         connections[identifier] = httpConnection
         httpConnection.start()
+    }
+
+    /// The remote address as `S3ServerHooks.acceptsConnection` gets it: no zone, IPv4-mapped IPv6 as IPv4
+    static func address(_ endpoint: NWEndpoint) -> String? {
+        guard case let .hostPort(host, _) = endpoint else { return nil }
+        switch host {
+        case let .ipv4(address):
+            return "\(address)".split(separator: "%").first.map(String.init)
+        case let .ipv6(address):
+            if let mapped = address.asIPv4 {
+                return "\(mapped)".split(separator: "%").first.map(String.init)
+            }
+            return "\(address)".split(separator: "%").first.map(String.init)
+        case let .name(name, _):
+            return name
+        @unknown default:
+            return nil
+        }
     }
 
     private func removeConnection(_ identifier: ObjectIdentifier) {

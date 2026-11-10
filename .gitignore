@@ -1,8 +1,24 @@
 .DS_Store
+.env
+
+# Swift
 /.build
+/.swiftpm
 /Packages
 xcuserdata/
 DerivedData/
-.swiftpm/configuration/registries.json
-.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+
+# macOS
+# Finder folder icon: a file named Icon plus a carriage return
+Icon[
+]
+
+# Agents (local agent instructions, settings and boards)
+CLAUDE.md
+AGENTS.md
+.claude/
+.codex/
+.commandcode/
+.hermes/
+KANBAN*.md

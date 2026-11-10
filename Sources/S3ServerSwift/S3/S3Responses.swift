@@ -31,6 +31,9 @@ enum S3Responses {
 
 extension S3Error {
     static let accessDenied = S3Error(code: "AccessDenied", message: "Access Denied", status: 403)
+    static func accessDenied(_ message: String) -> S3Error {
+        S3Error(code: "AccessDenied", message: message, status: 403)
+    }
     static let entityTooLarge = S3Error(code: "EntityTooLarge", message: "Payload too large", status: 413)
     static let methodNotAllowed = S3Error(code: "MethodNotAllowed", message: "Unsupported method", status: 405)
     static let noSuchKey = S3Error(code: "NoSuchKey", message: "Object not found", status: 404)

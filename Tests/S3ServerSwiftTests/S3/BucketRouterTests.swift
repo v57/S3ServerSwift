@@ -10,75 +10,38 @@ import Testing
         BucketRouter(bucketPaths: bucketPaths, defaultRoot: defaultRoot)
     }
 
-    // MARK: - Virtual-host bucket detection
+    // MARK: - Path-style addressing
 
-    @Test func pathStyleRequestsOnLocalhostHaveNoHostBucket() throws {
-        let router = makeRouter()
-        let (bucket, key) = try router.bucketAndKey(host: "localhost", path: "/bucket/key.txt")
+    @Test func pathNamesTheBucketAndKey() throws {
+        let (bucket, key) = try makeRouter().bucketAndKey(path: "/bucket/folder/key.txt")
         #expect(bucket == "bucket")
-        #expect(key == "key.txt")
+        #expect(key == "folder/key.txt")
     }
 
-    @Test func hostsEndingInLocalHaveNoHostBucket() throws {
-        let router = makeRouter()
-        let (bucket, key) = try router.bucketAndKey(host: "machine.local", path: "/bucket/key.txt")
+    @Test func bucketWithoutKeyHasNoKey() throws {
+        let (bucket, key) = try makeRouter().bucketAndKey(path: "/bucket/")
         #expect(bucket == "bucket")
-        #expect(key == "key.txt")
-    }
-
-    @Test(arguments: ["127.0.0.1", "192.168.1.5", "10.0.0.1"])
-    func ipLiteralHostsHaveNoHostBucket(_ host: String) throws {
-        let router = makeRouter()
-        let (bucket, _) = try router.bucketAndKey(host: host, path: "/bucket/key.txt")
-        #expect(bucket == "bucket")
-    }
-
-    @Test func twoLabelHostsHaveNoHostBucket() throws {
-        let router = makeRouter()
-        let (bucket, _) = try router.bucketAndKey(host: "machine.lan", path: "/bucket/key.txt")
-        #expect(bucket == "bucket")
-    }
-
-    @Test func subdomainHostFirstLabelIsBucket() throws {
-        let router = makeRouter()
-        let (bucket, key) = try router.bucketAndKey(host: "photos.example.com", path: "/key.txt")
-        #expect(bucket == "photos")
-        #expect(key == "key.txt")
-    }
-
-    @Test func hostBucketWinsOverConflictingPathBucket() throws {
-        let router = makeRouter()
-        let (bucket, key) = try router.bucketAndKey(host: "photos.example.com", path: "/other/photo.jpg")
-        #expect(bucket == "photos")
-        // The entire path becomes the key when the host bucket wins.
-        #expect(key == "other/photo.jpg")
-    }
-
-    @Test func pathStyleBucketOnSubdomainHostUsesPathSegments() throws {
-        let router = makeRouter()
-        let (bucket, key) = try router.bucketAndKey(host: "photos.example.com", path: "/photos/summer/a.jpg")
-        #expect(bucket == "photos")
-        #expect(key == "summer/a.jpg")
+        #expect(key == nil)
     }
 
     // MARK: - Bucket/key decoding and validation
 
     @Test func percentEncodedBucketIsDecoded() throws {
         let router = makeRouter()
-        let (bucket, _) = try router.bucketAndKey(host: "localhost", path: "/my%20bucket/key.txt")
+        let (bucket, _) = try router.bucketAndKey(path: "/my%20bucket/key.txt")
         #expect(bucket == "my bucket")
     }
 
     @Test func percentEncodedKeyIsDecoded() throws {
         let router = makeRouter()
-        let (_, key) = try router.bucketAndKey(host: "localhost", path: "/bucket/a%20b/c.txt")
+        let (_, key) = try router.bucketAndKey(path: "/bucket/a%20b/c.txt")
         #expect(key == "a b/c.txt")
     }
 
     @Test func invalidPercentEncodingInBucketThrows() {
         let router = makeRouter()
         #expect(throws: CanonicalizationError.invalidPercentEncoding) {
-            _ = try router.bucketAndKey(host: "localhost", path: "/bucket%ZZ/key.txt")
+            _ = try router.bucketAndKey(path: "/bucket%ZZ/key.txt")
         }
     }
 
@@ -87,20 +50,20 @@ import Testing
         // A decoded bucket containing a literal slash is malformed: `%2F`
         // decodes to `/`, which must be rejected.
         #expect(throws: S3Error(code: "InvalidURI", message: "invalid bucket", status: 400)) {
-            _ = try router.bucketAndKey(host: "localhost", path: "/a%2Fb/c.txt")
+            _ = try router.bucketAndKey(path: "/a%2Fb/c.txt")
         }
     }
 
     @Test func bucketWithBackslashThrowsInvalidURI() {
         let router = makeRouter()
         #expect(throws: S3Error(code: "InvalidURI", message: "invalid bucket", status: 400)) {
-            _ = try router.bucketAndKey(host: "localhost", path: "/a%5Cb/c.txt")
+            _ = try router.bucketAndKey(path: "/a%5Cb/c.txt")
         }
     }
 
     @Test func missingBucketReturnsNil() throws {
         let router = makeRouter()
-        let (bucket, key) = try router.bucketAndKey(host: "localhost", path: "/")
+        let (bucket, key) = try router.bucketAndKey(path: "/")
         #expect(bucket == nil)
         #expect(key == nil)
     }

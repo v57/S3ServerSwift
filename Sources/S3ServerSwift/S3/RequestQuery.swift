@@ -36,21 +36,6 @@ enum RequestQuery {
         return target
     }
 
-    /// The host value derived from request headers, lowercased and with any
-    /// trailing port stripped, matching `URL.hostname`.
-    static func hostname(from headers: [String: String]) -> String? {
-        guard let host = headerValue("host", in: headers) else { return nil }
-        // IPv6 literals like [::1] keep the brackets; only strip a trailing
-        // `:port` for plain hostnames/IPv4.
-        if host.hasPrefix("[") {
-            return host.lowercased()
-        }
-        if let colon = host.firstIndex(of: ":") {
-            return String(host[..<colon]).lowercased()
-        }
-        return host.lowercased()
-    }
-
     static func headerValue(_ name: String, in headers: [String: String]) -> String? {
         headers.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
     }
